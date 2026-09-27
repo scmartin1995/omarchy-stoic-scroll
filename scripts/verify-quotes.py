@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Verify every quote against its public-domain source and regenerate Quotes.js.
+
+Maintainer tooling only; the plugin never runs this and makes no network
+requests. Sources are cached under scripts/.cache/.
+
+Each quote must appear verbatim in its source edition. Normalization is limited
+to whitespace, curly vs straight quotation marks, translator's square brackets,
+letter case, and trailing punctuation where an excerpt ends mid-sentence.
+
+Usage: scripts/verify-quotes.py [--write]
+"""
+import html
+import json
+import re
+import sys
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CACHE = ROOT / "scripts" / ".cache"
+USER_AGENT = "omarchy-stoic-scroll quote verification (https://github.com/scmartin1995/omarchy-stoic-scroll)"
+
+MARCUS_URL = "https://www.gutenberg.org/cache/epub/15877/pg15877.txt"
+EPICTETUS_URL = "https://www.gutenberg.org/cache/epub/10661/pg10661.txt"
+SENECA_PAGE = "Moral letters to Lucilius/Letter {n}"
+
+ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"]
+
+
+def fetch(url, dest):
+    if dest.exists():
+        return dest.read_text(encoding="utf-8")
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    for attempt in range(5):
+        try:
+            data = urllib.request.urlopen(req, timeout=60).read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt == 4:
+                raise
+            time.sleep(5 * (attempt + 1))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(data, encoding="utf-8")
+    time.sleep(1)
+    return data
+
+
+def normalize(text):
+    text = text.replace("\u200b", "").replace("\r", " ")
+    text = text.translate(str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'}))
+    text = text.replace("[", "").replace("]", "")
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def marcus_books():
+    raw = fetch(MARCUS_URL, CACHE / "pg15877.txt")
+    lines = raw.splitlines()
+    starts = []
+    for i, line in enumerate(lines):
+        m = re.fullmatch(r"([IVX]+)\.\s*", line)
+        if m and m.group(1) in ROMAN and (not starts or ROMAN.index(m.group(1)) == len(starts)):
+            starts.append(i)
+    if len(starts) != 12:
+        sys.exit(f"expected 12 book headings in Meditations, found {len(starts)}")
+    end = next(i for i, l in enumerate(lines) if l.startswith("*** END OF THE PROJECT GUTENBERG"))
+    bounds = starts + [end]
+    return [(f"Meditations, Book {ROMAN[b]}", normalize("\n".join(lines[bounds[b]:bounds[b + 1]]))) for b in range(12)]
+
+
+def epictetus_parts():
+    raw = fetch(EPICTETUS_URL, CACHE / "pg10661.txt")
+    split = raw.rfind("THE ENCHEIRIDION, OR MANUAL.")
+    end = raw.find("*** END OF THE PROJECT GUTENBERG")
+    return [("Encheiridion", normalize(raw[split:end])), ("Discourses", normalize(raw[:split]))]
+
+
+def seneca_letter(n):
+    params = {"action": "parse", "page": SENECA_PAGE.format(n=n), "prop": "text|revid", "format": "json", "formatversion": 2}
+    dest = CACHE / f"seneca-{n}.json"
+    data = json.loads(fetch("https://en.wikisource.org/w/api.php?" + urllib.parse.urlencode(params), dest))["parse"]
+    text = re.sub(r"<sup.*?</sup>", "", data["text"], flags=re.S)
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    return data["revid"], normalize(text)
+
+
+def excerpt_found(quote, source):
+    q = normalize(quote)
+    return q in source or q.rstrip(".?!,;:") in source
+
+
+def main():
+    quotes = json.loads((ROOT / "scripts" / "quotes.source.json").read_text(encoding="utf-8"))
+    books, parts, revisions, failures, out = marcus_books(), epictetus_parts(), {}, [], []
+
+    for q in quotes:
+        cite = None
+        if q["work"] == "marcus":
+            cite = next((name for name, text in books if excerpt_found(q["text"], text)), None)
+        elif q["work"] == "epictetus":
+            cite = next((name for name, text in parts if excerpt_found(q["text"], text)), None)
+        elif q["work"] == "seneca":
+            revid, text = seneca_letter(q["letter"])
+            revisions[q["letter"]] = revid
+            if excerpt_found(q["text"], text):
+                cite = f"Moral Letters to Lucilius, Letter {q['letter']}"
+        if cite:
+            out.append({"text": q["text"], "author": q["author"], "source": cite})
+        else:
+            failures.append(q["text"])
+
+    print(f"{len(out)}/{len(quotes)} quotes verified")
+    for f in failures:
+        print("NOT FOUND:", f)
+    if revisions:
+        print("Wikisource revisions:", json.dumps(dict(sorted(revisions.items()))))
+    if failures:
+        sys.exit(1)
+
+    if "--write" in sys.argv:
+        body = json.dumps(out, indent=2, ensure_ascii=False)
+        (ROOT / "Quotes.js").write_text(
+            ".pragma library\n\n"
+            "// Generated by scripts/verify-quotes.py from scripts/quotes.source.json.\n"
+            "// Every line is verified verbatim against the editions listed in SOURCES.md.\n"
+            f"var quotes = {body}\n\n"
+            "function format(i) {\n"
+            "  return \"\\u201c\" + quotes[i].text + \"\\u201d \\u2014 \" + quotes[i].author\n"
+            "}\n\n"
+            "function tooltip(i) {\n"
+            "  return format(i) + \"\\n\" + quotes[i].source\n"
+            "}\n\n"
+            "function randomIndex(exclude) {\n"
+            "  if (quotes.length < 2) return 0\n"
+            "  var i = exclude\n"
+            "  while (i === exclude) i = Math.floor(Math.random() * quotes.length)\n"
+            "  return i\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        print("wrote Quotes.js")
+
+
+if __name__ == "__main__":
+    main()

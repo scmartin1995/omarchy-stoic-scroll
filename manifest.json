@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.scmartin1995.stoic-scroll",
+  "name": "Stoic Scroll",
+  "version": "1.0.0",
+  "author": "scmartin1995",
+  "description": "Scrolls sourced Stoic quotes across the bar, sized to the free space",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Widget.qml" },
+  "barWidget": {
+    "displayName": "Stoic Scroll",
+    "description": "Scrolls sourced Stoic quotes across the bar, sized to the free space",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "maxWidth": 600, "speed": 40 },
+    "schema": [
+      { "key": "maxWidth", "type": "number", "label": "Maximum width (px)" },
+      { "key": "speed", "type": "number", "label": "Scroll speed (px/sec)" }
+    ]
+  }
+}
